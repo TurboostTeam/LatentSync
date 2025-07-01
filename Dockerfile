@@ -9,25 +9,28 @@ RUN apt-get update && apt-get install -y \
     python3.10 \
     python3-pip \
     ffmpeg \
+    libgl1 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
-
-# OpenCV 依赖
-RUN apt -y install libgl1
 
 # 下载模型
 RUN pip install -U huggingface_hub
 RUN mkdir -p checkpoints
 RUN huggingface-cli download --resume-download ByteDance/LatentSync-1.6 whisper/tiny.pt --local-dir checkpoints
 RUN huggingface-cli download --resume-download ByteDance/LatentSync-1.6 latentsync_unet.pt --local-dir checkpoints
-
-# 复制requirements文件
+# 复制并安装Python依赖
 COPY requirements.txt .
-
-# Python 依赖
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制项目文件
 COPY . .
 
+# 设置环境变量
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
 # 启动命令
-CMD ["python3", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["python3", "-u", "api/main.py"] 
