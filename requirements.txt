@@ -24,3 +24,11 @@ kornia==0.8.0
 insightface==0.7.3
 onnxruntime-gpu==1.21.0
 DeepCache==0.1.1
+
+fastapi>=0.115.2
+uvicorn[standard]==0.24.0
+minio==7.2.0
+python-multipart>=0.0.18
+redis==5.0.1
+python-dotenv==1.0.0
+requests>=2.31.0

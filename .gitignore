@@ -50,3 +50,6 @@ wandb/
 !/docs/*
 !/internal/*.png
 .cog/
+
+# env files
+.env
