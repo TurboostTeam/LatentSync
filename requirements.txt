@@ -25,12 +25,12 @@ insightface==0.7.3
 onnxruntime-gpu==1.21.0
 DeepCache==0.1.1
 
-fastapi>=0.115.2
+fastapi==0.115.14
 uvicorn[standard]==0.24.0
 minio==7.2.0
-oss2>=2.20.0
-python-multipart>=0.0.18
+oss2==2.19.1
+python-multipart==0.0.20
 redis==5.0.1
 python-dotenv==1.0.0
-requests>=2.31.0
-runpod>=1.7.6
+requests==2.32.4
+runpod==1.7.12
