@@ -1,0 +1,19 @@
+# Git 相关
+.git
+.gitignore
+.gitattributes
+
+# Python 相关
+__pycache__
+
+
+# IDE 相关
+.vscode
+.idea
+
+# model files
+checkpoints/
+
+# demo files
+assets/
+
