@@ -4,6 +4,7 @@
 """
 import os
 import logging
+import sys
 import uvicorn
 from dotenv import load_dotenv, find_dotenv
 
@@ -23,6 +24,12 @@ def get_deployment_mode():
     Returns:
         str: 'runpod' 或 'fastapi'
     """
+
+    # 检查命令行参数
+    if '--runpod' in sys.argv:
+        return 'runpod'
+    elif '--fastapi' in sys.argv:
+        return 'fastapi'
     
     # 自动检测：
     # 如果有 RUNPOD_POD_ID 或 RUNPOD_ENDPOINT_ID 环境变量，说明在 RunPod 环境中

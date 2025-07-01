@@ -5,6 +5,10 @@ RunPod Serverless Handler - FastAPI 适配器
 import asyncio
 import logging
 from datetime import datetime
+import nest_asyncio
+
+# 应用 nest_asyncio 以支持嵌套事件循环
+nest_asyncio.apply()
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -13,6 +17,22 @@ logger = logging.getLogger(__name__)
 # 全局 FastAPI 应用实例和初始化状态
 app = None
 is_initialized = False
+
+def run_async(coro):
+    """
+    在可能已存在事件循环的环境中运行异步函数
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 事件循环正在运行，使用 nest_asyncio
+            return asyncio.run(coro)
+        else:
+            # 事件循环未运行，正常运行
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        # 如果没有事件循环，创建一个新的
+        return asyncio.run(coro)
 
 async def initialize_fastapi_app():
     """初始化 FastAPI 应用（只执行一次）"""
@@ -49,7 +69,7 @@ def handler(job):
     try:
         # 确保 FastAPI 应用已初始化（只初始化一次）
         if not is_initialized:
-            asyncio.run(initialize_fastapi_app())
+            run_async(initialize_fastapi_app())
         
         # 获取输入数据
         job_input = job.get("input", {})
@@ -86,7 +106,7 @@ def handle_health_check():
         # 调用 FastAPI 健康检查函数
         from api.server import health_check
         
-        result = asyncio.run(health_check())
+        result = run_async(health_check())
         
         # 只添加 RunPod 模式标识，保持原始响应格式
         result["mode"] = "runpod_serverless"
@@ -121,7 +141,7 @@ def handle_lipsync_request(job_input):
         request = LipSyncRequest(video_url=video_url, audio_url=audio_url)
         
         # 调用 FastAPI 创建任务函数
-        result = asyncio.run(create_lip_sync_task(request))
+        result = run_async(create_lip_sync_task(request))
         
         # 转换为字典并添加模式标识
         response = result.dict()
@@ -145,7 +165,7 @@ def handle_status_request(job_input):
         from fastapi import HTTPException
         
         try:
-            result = asyncio.run(get_task_status(task_id))
+            result = run_async(get_task_status(task_id))
             
             # 转换为字典并添加模式标识，保持原始格式
             response = result.dict()
@@ -169,7 +189,7 @@ def handle_list_tasks():
         # 调用 FastAPI 任务列表函数
         from api.server import list_tasks
         
-        result = asyncio.run(list_tasks())
+        result = run_async(list_tasks())
         
         # list_tasks 返回的是列表，需要包装成字典格式
         response = {
@@ -189,7 +209,7 @@ def handle_queue_status():
         # 调用 FastAPI 队列状态函数
         from api.server import get_queue_status
         
-        result = asyncio.run(get_queue_status())
+        result = run_async(get_queue_status())
         
         # 添加模式标识
         result["mode"] = "runpod_serverless"
@@ -212,7 +232,7 @@ def handle_delete_task(job_input):
         from fastapi import HTTPException
         
         try:
-            result = asyncio.run(delete_task(task_id))
+            result = run_async(delete_task(task_id))
             
             # 只添加模式标识，保持原始响应格式
             result["mode"] = "runpod_serverless"
@@ -238,5 +258,5 @@ def start_runpod_handler():
         logger.info("请运行: pip install runpod")
         raise
     
-    logger.info("启动 RunPod Serverless Handler (FastAPI 适配器模式)")
+    logger.info("启动 RunPod Serverless Handler")
     runpod.serverless.start({"handler": handler})
