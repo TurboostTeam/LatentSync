@@ -28,6 +28,7 @@ DeepCache==0.1.1
 fastapi>=0.115.2
 uvicorn[standard]==0.24.0
 minio==7.2.0
+oss2>=2.20.0
 python-multipart>=0.0.18
 redis==5.0.1
 python-dotenv==1.0.0
