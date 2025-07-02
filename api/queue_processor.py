@@ -240,7 +240,7 @@ class QueueProcessor:
 
         # 构建命令行参数
         cmd = [
-            "python",
+            "python3",
             "-m",
             "scripts.inference",
             "--unet_config_path",
