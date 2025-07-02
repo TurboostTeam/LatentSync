@@ -34,9 +34,6 @@ class Config:
         "MODEL_CHECKPOINT_PATH", "checkpoints/latentsync_unet.pt"
     )
 
-    # API配置
-    API_PORT: int = int(os.getenv("API_PORT", "8000"))
-
     # 对象存储URL配置
     SIGNED_URL_EXPIRE_HOURS: int = int(os.getenv("SIGNED_URL_EXPIRE_HOURS", "24"))
 
