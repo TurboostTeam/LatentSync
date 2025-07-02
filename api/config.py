@@ -23,6 +23,8 @@ class Config:
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
     REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD")
     REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+    REDIS_SSL: bool = os.getenv("REDIS_SSL", "False").lower() == "true"
+    REDIS_USERNAME: Optional[str] = os.getenv("REDIS_USERNAME")
 
     # 模型配置
     MODEL_CONFIG_PATH: str = os.getenv(

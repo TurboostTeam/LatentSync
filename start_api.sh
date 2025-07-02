@@ -12,4 +12,4 @@ export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 # 启动API服务
 echo "PYTHONPATH: $PYTHONPATH"
 echo "================================================"
-python -u api/main.py --fastapi
+python3 -u api/main.py --fastapi
