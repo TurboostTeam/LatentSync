@@ -25,9 +25,9 @@ RUN huggingface-cli download --resume-download ByteDance/LatentSync-1.6 whisper/
 RUN huggingface-cli download --resume-download ByteDance/LatentSync-1.6 latentsync_unet.pt --local-dir checkpoints
 
 # 下载并解压 buffalo_l 模型，用于人脸检测和面部对齐
-RUN mkdir -p checkpoints/auxiliary/models
+RUN mkdir -p checkpoints/auxiliary/models/buffalo_l
 RUN wget https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip -O checkpoints/auxiliary/models/buffalo_l.zip
-RUN cd checkpoints/auxiliary/models && unzip buffalo_l.zip && rm buffalo_l.zip
+RUN cd checkpoints/auxiliary/models && unzip buffalo_l.zip -d buffalo_l && rm buffalo_l.zip
 
 # 复制并安装Python依赖
 COPY requirements.txt .
