@@ -34,3 +34,4 @@ redis==5.0.1
 python-dotenv==1.0.0
 requests==2.32.4
 runpod==1.7.12
+nest_asyncio==1.6.0
