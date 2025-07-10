@@ -66,7 +66,6 @@ class AliyunOSSClient(BaseStorageClient):
             
             # 生成预签名URL
             output_url = self.build_url(object_key)
-            logger.info(f"输出URL: {output_url}")
 
             return output_url
 

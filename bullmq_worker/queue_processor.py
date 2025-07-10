@@ -52,7 +52,7 @@ class QueueProcessor:
         temp_dir: str,
     ):
         """使用子进程运行推理"""
-        logger.info(f"开始执行唇形同步...")
+        logger.info(f"🔄 开始执行唇形同步...")
 
         # 构建命令行参数
         cmd = [
@@ -114,9 +114,9 @@ class QueueProcessor:
             output_path = os.path.join(temp_dir, "output_video.mp4")
 
             # 下载输入文件
-            logger.info(f"开始下载视频: {video_url}")
+            logger.info(f"🔄 开始下载视频: {video_url}")
             await self._download_input_files(video_url, video_path)
-            logger.info(f"开始下载音频: {audio_url}")
+            logger.info(f"🔄 开始下载音频: {audio_url}")
             await self._download_input_files(audio_url, audio_path)
 
             # 使用子进程调用推理脚本

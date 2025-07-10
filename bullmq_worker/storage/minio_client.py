@@ -110,7 +110,6 @@ class MinIOClient(BaseStorageClient):
 
             # 生成预签名URL
             output_url = self.build_url(self.bucket_name, object_key)
-            logger.info(f"输出URL: {output_url}")
 
             return output_url
 
