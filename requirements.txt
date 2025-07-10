@@ -24,3 +24,8 @@ kornia==0.8.0
 insightface==0.7.3
 onnxruntime-gpu==1.21.0
 DeepCache==0.1.1
+
+bullmq==2.15.0
+python-dotenv==1.0.0
+oss2==2.19.1
+minio==7.1.17

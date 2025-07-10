@@ -23,6 +23,9 @@ class Config:
     REDIS_DB: int = int(os.getenv("REDIS_DB"))
     REDIS_SSL: bool = os.getenv("REDIS_SSL").lower() == "true"
 
+    # BullMQ 队列名称
+    QUEUE_NAME: str = os.getenv("QUEUE_NAME")
+
     # 模型配置
     MODEL_CONFIG_PATH: str = os.getenv(
         "MODEL_CONFIG_PATH", "configs/unet/stage2_512.yaml"
