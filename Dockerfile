@@ -42,6 +42,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制项目文件
 COPY . .
 
-# 启动命令
+# 确保 Python 能找到当前目录的模块
+ENV PYTHONPATH=/app:$PYTHONPATH
+# 确保输出不缓冲
 ENV PYTHONUNBUFFERED=1
+
+# 启动命令
 CMD ["python3", "-m", "bullmq_worker.main"] 
