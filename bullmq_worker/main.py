@@ -80,7 +80,6 @@ async def main():
                 "stalledInterval": 60000,  # 60秒检查一次 stalled 任务，将停滞任务重新放回队列
                 "maxStalledCount": 1,     # 最大 stalled 次数设为1，避免重复处理
                 "concurrency": 1,         # 单任务并发，避免资源竞争
-                "drainDelay": 5000,       # 5秒轮询间隔
             }
         )
 
@@ -96,7 +95,7 @@ async def main():
         raise
     finally:
         # 关闭worker
-        if worker:
+        if "worker" in locals():
             logger.info("🔉 正在关闭worker...")
             await worker.close()
             logger.info("✅ Worker已成功关闭\n\n")
