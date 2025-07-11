@@ -50,3 +50,7 @@ wandb/
 !/docs/*
 !/internal/*.png
 .cog/
+
+.env
+bullmq_producer/
+downloads/
