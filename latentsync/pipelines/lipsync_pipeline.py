@@ -253,21 +253,45 @@ class LipsyncPipeline(DiffusionPipeline):
         faces = []
         boxes = []
         affine_matrices = []
+        has_face_flags = []  # Marks each frame with or without face
         print(f"Affine transforming {len(video_frames)} faces...")
-        for frame in tqdm.tqdm(video_frames):
-            face, box, affine_matrix = self.image_processor.affine_transform(frame)
-            faces.append(face)
-            boxes.append(box)
-            affine_matrices.append(affine_matrix)
+        for idx, frame in enumerate(tqdm.tqdm(video_frames)):
+            try:
+                face, box, affine_matrix = self.image_processor.affine_transform(frame)
+                faces.append(face)
+                boxes.append(box)
+                affine_matrices.append(affine_matrix)
+                has_face_flags.append(True)
+            except RuntimeError as e:
+                if "Face not detected" in str(e):
+                    print(f"Warning: Frame {idx}: Face not detected. Using placeholder.")
+                    placeholder_face = torch.full(
+                        (
+                            3, 
+                            self.image_processor.resolution, 
+                            self.image_processor.resolution
+                        ),
+                        127.0   # Medium gray
+                    )
+                    faces.append(placeholder_face)
+                    boxes.append(None)
+                    affine_matrices.append(None)
+                    has_face_flags.append(False)
+                else:
+                    raise e
 
         faces = torch.stack(faces)
-        return faces, boxes, affine_matrices
+        return faces, boxes, affine_matrices, has_face_flags
 
-    def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
+    def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list, has_face_flags: list):
         video_frames = video_frames[: len(faces)]
         out_frames = []
         print(f"Restoring {len(faces)} faces...")
         for index, face in enumerate(tqdm.tqdm(faces)):
+            # If there is no face in the current frame, use the original frame directly
+            if not has_face_flags[index]:
+                out_frames.append(video_frames[index])
+                continue
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
@@ -281,33 +305,37 @@ class LipsyncPipeline(DiffusionPipeline):
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
         if len(whisper_chunks) > len(video_frames):
-            faces, boxes, affine_matrices = self.affine_transform_video(video_frames)
+            faces, boxes, affine_matrices, has_face_flags = self.affine_transform_video(video_frames)
             num_loops = math.ceil(len(whisper_chunks) / len(video_frames))
             loop_video_frames = []
             loop_faces = []
             loop_boxes = []
             loop_affine_matrices = []
+            loop_has_face_flags = []
             for i in range(num_loops):
                 if i % 2 == 0:
                     loop_video_frames.append(video_frames)
                     loop_faces.append(faces)
                     loop_boxes += boxes
                     loop_affine_matrices += affine_matrices
+                    loop_has_face_flags += has_face_flags
                 else:
                     loop_video_frames.append(video_frames[::-1])
                     loop_faces.append(faces.flip(0))
                     loop_boxes += boxes[::-1]
                     loop_affine_matrices += affine_matrices[::-1]
+                    loop_has_face_flags += has_face_flags[::-1]
 
             video_frames = np.concatenate(loop_video_frames, axis=0)[: len(whisper_chunks)]
             faces = torch.cat(loop_faces, dim=0)[: len(whisper_chunks)]
             boxes = loop_boxes[: len(whisper_chunks)]
             affine_matrices = loop_affine_matrices[: len(whisper_chunks)]
+            has_face_flags = loop_has_face_flags[: len(whisper_chunks)]
         else:
             video_frames = video_frames[: len(whisper_chunks)]
-            faces, boxes, affine_matrices = self.affine_transform_video(video_frames)
+            faces, boxes, affine_matrices, has_face_flags = self.affine_transform_video(video_frames)
 
-        return video_frames, faces, boxes, affine_matrices
+        return video_frames, faces, boxes, affine_matrices, has_face_flags
 
     @torch.no_grad()
     def __call__(
@@ -367,7 +395,7 @@ class LipsyncPipeline(DiffusionPipeline):
         audio_samples = read_audio(audio_path)
         video_frames = read_video(video_path, use_decord=False)
 
-        video_frames, faces, boxes, affine_matrices = self.loop_video(whisper_chunks, video_frames)
+        video_frames, faces, boxes, affine_matrices, has_face_flags = self.loop_video(whisper_chunks, video_frames)
 
         synced_video_frames = []
 
@@ -386,16 +414,34 @@ class LipsyncPipeline(DiffusionPipeline):
 
         num_inferences = math.ceil(len(whisper_chunks) / num_frames)
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+
+            chunk_start = i * num_frames
+            chunk_end = min((i + 1) * num_frames, len(whisper_chunks))
+            chunk_has_face_flags = has_face_flags[chunk_start:chunk_end]
+            
+            # Check if there is any face in the current chunk, if not, skip the diffusion generation
+            if not any(chunk_has_face_flags):
+                print(f"Chunk {i}: No faces detected in any frame, adding placeholders")
+                chunk_length = chunk_end - chunk_start
+                placeholder_frames = torch.full(
+                    (chunk_length, 3, height, width),
+                    0.0,    # Medium gray in normalized [-1, 1] range
+                    device=device,
+                    dtype=weight_dtype
+                )
+                synced_video_frames.append(placeholder_frames)
+                continue
+            
             if self.unet.add_audio_layer:
-                audio_embeds = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
+                audio_embeds = torch.stack(whisper_chunks[chunk_start:chunk_end])
                 audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
                 if do_classifier_free_guidance:
                     null_audio_embeds = torch.zeros_like(audio_embeds)
                     audio_embeds = torch.cat([null_audio_embeds, audio_embeds])
             else:
                 audio_embeds = None
-            inference_faces = faces[i * num_frames : (i + 1) * num_frames]
-            latents = all_latents[:, :, i * num_frames : (i + 1) * num_frames]
+            inference_faces = faces[chunk_start : chunk_end]
+            latents = all_latents[:, :, chunk_start : chunk_end]
             ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
                 inference_faces, affine_transform=False
             )
@@ -457,7 +503,7 @@ class LipsyncPipeline(DiffusionPipeline):
             )
             synced_video_frames.append(decoded_latents)
 
-        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
+        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices, has_face_flags)
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
