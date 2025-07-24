@@ -33,6 +33,7 @@ import cv2
 from ..models.unet import UNet3DConditionModel
 from ..utils.util import read_video, read_audio, write_video, check_ffmpeg_installed
 from ..utils.image_processor import ImageProcessor, load_fixed_mask
+from ..utils.resample import resample_video_fps, resample_audio_sr
 from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
@@ -565,6 +566,14 @@ class LipsyncPipeline(DiffusionPipeline):
         self.unet.eval()
 
         check_ffmpeg_installed()
+
+        # resample video and audio
+        video_path = resample_video_fps(
+            video_path, video_fps
+        )
+        audio_path = resample_audio_sr(
+            audio_path, audio_sample_rate
+        )
 
         # 0. Define call parameters
         device = self._execution_device
