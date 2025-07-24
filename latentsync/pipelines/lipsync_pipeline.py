@@ -302,6 +302,208 @@ class LipsyncPipeline(DiffusionPipeline):
             out_frames.append(out_frame)
         return np.stack(out_frames, axis=0)
 
+    def analyze_chunk(self, has_face_flags):
+        """Analyze the type of chunk：pure_face, pure_no_face, binary_mixed, complex_mixed"""
+        face_count = sum(has_face_flags)
+        total_count = len(has_face_flags)
+        
+        if face_count == 0:
+            return "pure_no_face", None
+        elif face_count == total_count:
+            return "pure_face", None
+        else:
+            # check if it can be split into two parts
+            transitions = []
+            for i in range(1, len(has_face_flags)):
+                if has_face_flags[i] != has_face_flags[i - 1]:
+                    transitions.append(i)
+            
+            if len(transitions) == 1:
+                # can be split into two parts
+                return "binary_mixed", transitions[0]
+            else:
+                # complex mixed
+                return "complex_mixed", transitions
+    
+    def process_chunk(
+        self, 
+        chunk_start, 
+        chunk_end, 
+        has_face_flags, 
+        whisper_chunks, 
+        faces, 
+        height, 
+        width, 
+        device, 
+        weight_dtype, 
+        do_classifier_free_guidance, 
+        generator, 
+        timesteps, 
+        extra_step_kwargs, 
+        all_latents, 
+        num_inference_steps, 
+        guidance_scale, 
+        callback, 
+        callback_steps
+    ):
+        """Process chunk, execute binary strategy for mixed chunk"""
+        chunk_has_face_flags = has_face_flags[chunk_start:chunk_end]
+        chunk_type, split_info = self.analyze_chunk(chunk_has_face_flags)
+        
+        if chunk_type == "pure_no_face":
+            # pure no face chunk, do not execute lipsync
+            print(f"Chunk [{chunk_start}:{chunk_end}]: No faces detected, adding placeholders")
+            chunk_length = chunk_end - chunk_start
+            placeholder_frames = torch.full(
+                (chunk_length, 3, height, width),
+                0.0,
+                device=device,
+                dtype=weight_dtype
+            )
+            return [placeholder_frames]
+        
+        elif chunk_type == 'pure_face':
+            # pure face chunk, execute lipsync
+            result = self._process_face_chunk(
+                chunk_start, chunk_end, whisper_chunks, faces, height, width,
+                device, weight_dtype, do_classifier_free_guidance,
+                generator, timesteps, extra_step_kwargs, all_latents,
+                num_inference_steps, guidance_scale, callback, callback_steps
+            )
+            return [result]
+        
+        elif chunk_type == 'binary_mixed':
+            # binary mixed chunk: split into two parts and process them separately
+            split_point = split_info
+            print(f"Chunk [{chunk_start}:{chunk_end}]: Binary mixed, splitting at position {split_point + chunk_start}")
+            
+            # process the first part
+            first_end = chunk_start + split_point
+            if chunk_has_face_flags[0]:  # the first part has face
+                result1 = self._process_face_chunk(
+                    chunk_start, first_end, whisper_chunks, faces, height, width,
+                    device, weight_dtype, do_classifier_free_guidance,
+                    generator, timesteps, extra_step_kwargs, all_latents,
+                    num_inference_steps, guidance_scale, callback, callback_steps
+                )
+            else:  # the first part has no face
+                chunk_length = first_end - chunk_start
+                result1 = torch.full(
+                    (chunk_length, 3, height, width),
+                    0.0,
+                    device=device,
+                    dtype=weight_dtype
+                )
+            
+            # process the second part
+            if chunk_has_face_flags[0]:  # if the first part has face, the second part must have no face
+                chunk_length = chunk_end - first_end
+                result2 = torch.full(
+                    (chunk_length, 3, height, width),
+                    0.0,
+                    device=device,
+                    dtype=weight_dtype
+                )
+            else:  # the second part has face
+                result2 = self._process_face_chunk(
+                    first_end, chunk_end, whisper_chunks, faces, height, width,
+                    device, weight_dtype, do_classifier_free_guidance,
+                    generator, timesteps, extra_step_kwargs, all_latents,
+                    num_inference_steps, guidance_scale, callback, callback_steps
+                )
+            
+            return [result1, result2]
+        
+        else:  # complex_mixed
+            # complex mixed chunk, warning and process as a whole chunk
+            print(f"WARNING: Chunk [{chunk_start}:{chunk_end}]: Complex mixed pattern detected!")
+            print(f"  Pattern: {chunk_has_face_flags}")
+            print(f"  Transitions at: {split_info}")
+            print(f"  Processing as a whole chunk (may affect quality)")
+            
+            result = self._process_face_chunk(
+                chunk_start, chunk_end, whisper_chunks, faces, height, width,
+                device, weight_dtype, do_classifier_free_guidance,
+                generator, timesteps, extra_step_kwargs, all_latents,
+                num_inference_steps, guidance_scale, callback, callback_steps
+            )
+            return [result]
+    
+    def _process_face_chunk(
+        self, chunk_start, chunk_end, whisper_chunks, faces, 
+        height, width, device, weight_dtype, 
+        do_classifier_free_guidance, generator, timesteps, 
+        extra_step_kwargs, all_latents, num_inference_steps, 
+        guidance_scale, callback, callback_steps
+    ):
+        """Process chunk with face"""
+        inference_faces = faces[chunk_start:chunk_end]
+        latents = all_latents[:, :, chunk_start:chunk_end]
+        
+        # prepare audio embeds
+        if self.unet.add_audio_layer:
+            audio_embeds = torch.stack(whisper_chunks[chunk_start:chunk_end])
+            audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
+            if do_classifier_free_guidance:
+                null_audio_embeds = torch.zeros_like(audio_embeds)
+                audio_embeds = torch.cat([null_audio_embeds, audio_embeds])
+        else:
+            audio_embeds = None
+        
+        ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
+            inference_faces, affine_transform=False
+        )
+        
+        # Prepare mask latent variables
+        mask_latents, masked_image_latents = self.prepare_mask_latents(
+            masks,
+            masked_pixel_values,
+            height,
+            width,
+            weight_dtype,
+            device,
+            generator,
+            do_classifier_free_guidance,
+        )
+        
+        # Prepare image latents
+        ref_latents = self.prepare_image_latents(
+            ref_pixel_values,
+            device,
+            weight_dtype,
+            generator,
+            do_classifier_free_guidance,
+        )
+        
+        # Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for j, t in enumerate(timesteps):
+                unet_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                unet_input = self.scheduler.scale_model_input(unet_input, t)
+                unet_input = torch.cat([unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
+                
+                noise_pred = self.unet(unet_input, t, encoder_hidden_states=audio_embeds).sample
+                
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_audio = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_audio - noise_pred_uncond)
+                
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                
+                if j == len(timesteps) - 1 or ((j + 1) > num_warmup_steps and (j + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and j % callback_steps == 0:
+                        callback(j, t, latents)
+        
+        # Decode latents
+        decoded_latents = self.decode_latents(latents)
+        decoded_latents = self.paste_surrounding_pixels_back(
+            decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
+        )
+        
+        return decoded_latents
+
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
         if len(whisper_chunks) > len(video_frames):
@@ -417,91 +619,30 @@ class LipsyncPipeline(DiffusionPipeline):
 
             chunk_start = i * num_frames
             chunk_end = min((i + 1) * num_frames, len(whisper_chunks))
-            chunk_has_face_flags = has_face_flags[chunk_start:chunk_end]
             
-            # Check if there is any face in the current chunk, if not, skip the diffusion generation
-            if not any(chunk_has_face_flags):
-                print(f"Chunk {i}: No faces detected in any frame, adding placeholders")
-                chunk_length = chunk_end - chunk_start
-                placeholder_frames = torch.full(
-                    (chunk_length, 3, height, width),
-                    0.0,    # Medium gray in normalized [-1, 1] range
-                    device=device,
-                    dtype=weight_dtype
-                )
-                synced_video_frames.append(placeholder_frames)
-                continue
-            
-            if self.unet.add_audio_layer:
-                audio_embeds = torch.stack(whisper_chunks[chunk_start:chunk_end])
-                audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
-                if do_classifier_free_guidance:
-                    null_audio_embeds = torch.zeros_like(audio_embeds)
-                    audio_embeds = torch.cat([null_audio_embeds, audio_embeds])
-            else:
-                audio_embeds = None
-            inference_faces = faces[chunk_start : chunk_end]
-            latents = all_latents[:, :, chunk_start : chunk_end]
-            ref_pixel_values, masked_pixel_values, masks = self.image_processor.prepare_masks_and_masked_images(
-                inference_faces, affine_transform=False
-            )
-
-            # 7. Prepare mask latent variables
-            mask_latents, masked_image_latents = self.prepare_mask_latents(
-                masks,
-                masked_pixel_values,
+            # process chunk
+            chunk_results = self.process_chunk(
+                chunk_start,
+                chunk_end,
+                has_face_flags,
+                whisper_chunks,
+                faces,
                 height,
                 width,
-                weight_dtype,
-                device,
-                generator,
-                do_classifier_free_guidance,
-            )
-
-            # 8. Prepare image latents
-            ref_latents = self.prepare_image_latents(
-                ref_pixel_values,
                 device,
                 weight_dtype,
-                generator,
                 do_classifier_free_guidance,
+                generator,
+                timesteps,
+                extra_step_kwargs,
+                all_latents,
+                num_inference_steps,
+                guidance_scale,
+                callback,
+                callback_steps,
             )
-
-            # 9. Denoising loop
-            num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-            with self.progress_bar(total=num_inference_steps) as progress_bar:
-                for j, t in enumerate(timesteps):
-                    # expand the latents if we are doing classifier free guidance
-                    unet_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-
-                    unet_input = self.scheduler.scale_model_input(unet_input, t)
-
-                    # concat latents, mask, masked_image_latents in the channel dimension
-                    unet_input = torch.cat([unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
-
-                    # predict the noise residual
-                    noise_pred = self.unet(unet_input, t, encoder_hidden_states=audio_embeds).sample
-
-                    # perform guidance
-                    if do_classifier_free_guidance:
-                        noise_pred_uncond, noise_pred_audio = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_audio - noise_pred_uncond)
-
-                    # compute the previous noisy sample x_t -> x_t-1
-                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
-                    # call the callback, if provided
-                    if j == len(timesteps) - 1 or ((j + 1) > num_warmup_steps and (j + 1) % self.scheduler.order == 0):
-                        progress_bar.update()
-                        if callback is not None and j % callback_steps == 0:
-                            callback(j, t, latents)
-
-            # Recover the pixel values
-            decoded_latents = self.decode_latents(latents)
-            decoded_latents = self.paste_surrounding_pixels_back(
-                decoded_latents, ref_pixel_values, 1 - masks, device, weight_dtype
-            )
-            synced_video_frames.append(decoded_latents)
+            
+            synced_video_frames.extend(chunk_results)
 
         synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices, has_face_flags)
 
