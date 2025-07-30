@@ -330,9 +330,8 @@ class LipsyncPipeline(DiffusionPipeline):
         self, 
         chunk_start, 
         chunk_end, 
-        has_face_flags, 
         whisper_chunks, 
-        faces, 
+        video_frames,
         height, 
         width, 
         device, 
@@ -347,8 +346,10 @@ class LipsyncPipeline(DiffusionPipeline):
         callback, 
         callback_steps
     ):
-        """Process chunk, execute binary strategy for mixed chunk"""
-        chunk_has_face_flags = has_face_flags[chunk_start:chunk_end]
+        """Process chunk and return results with metadata"""
+        chunk_video_frames = video_frames[chunk_start:chunk_end]
+        chunk_faces, chunk_boxes, chunk_affine_matrices, chunk_has_face_flags = self.affine_transform_video(chunk_video_frames)
+
         chunk_type, split_info = self.analyze_chunk(chunk_has_face_flags)
         
         if chunk_type == "pure_no_face":
@@ -361,17 +362,17 @@ class LipsyncPipeline(DiffusionPipeline):
                 device=device,
                 dtype=weight_dtype
             )
-            return [placeholder_frames]
+            return [placeholder_frames], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
         
         elif chunk_type == 'pure_face':
             # pure face chunk, execute lipsync
             result = self._process_face_chunk(
-                chunk_start, chunk_end, whisper_chunks, faces, height, width,
+                chunk_start, chunk_end, whisper_chunks, chunk_faces, height, width,
                 device, weight_dtype, do_classifier_free_guidance,
                 generator, timesteps, extra_step_kwargs, all_latents,
                 num_inference_steps, guidance_scale, callback, callback_steps
             )
-            return [result]
+            return [result], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
         
         elif chunk_type == 'binary_mixed':
             # binary mixed chunk: split into two parts and process them separately
@@ -382,7 +383,7 @@ class LipsyncPipeline(DiffusionPipeline):
             first_end = chunk_start + split_point
             if chunk_has_face_flags[0]:  # the first part has face
                 result1 = self._process_face_chunk(
-                    chunk_start, first_end, whisper_chunks, faces, height, width,
+                    chunk_start, first_end, whisper_chunks, chunk_faces[:split_point], height, width,
                     device, weight_dtype, do_classifier_free_guidance,
                     generator, timesteps, extra_step_kwargs, all_latents,
                     num_inference_steps, guidance_scale, callback, callback_steps
@@ -407,13 +408,13 @@ class LipsyncPipeline(DiffusionPipeline):
                 )
             else:  # the second part has face
                 result2 = self._process_face_chunk(
-                    first_end, chunk_end, whisper_chunks, faces, height, width,
+                    first_end, chunk_end, whisper_chunks, chunk_faces[split_point:], height, width,
                     device, weight_dtype, do_classifier_free_guidance,
                     generator, timesteps, extra_step_kwargs, all_latents,
                     num_inference_steps, guidance_scale, callback, callback_steps
                 )
             
-            return [result1, result2]
+            return [result1, result2], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
         
         else:  # complex_mixed
             # complex mixed chunk, warning and process as a whole chunk
@@ -423,22 +424,21 @@ class LipsyncPipeline(DiffusionPipeline):
             print(f"  Processing as a whole chunk (may affect quality)")
             
             result = self._process_face_chunk(
-                chunk_start, chunk_end, whisper_chunks, faces, height, width,
+                chunk_start, chunk_end, whisper_chunks, chunk_faces, height, width,
                 device, weight_dtype, do_classifier_free_guidance,
                 generator, timesteps, extra_step_kwargs, all_latents,
                 num_inference_steps, guidance_scale, callback, callback_steps
             )
-            return [result]
-    
+            return [result], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
+
     def _process_face_chunk(
-        self, chunk_start, chunk_end, whisper_chunks, faces, 
+        self, chunk_start, chunk_end, whisper_chunks, inference_faces, 
         height, width, device, weight_dtype, 
         do_classifier_free_guidance, generator, timesteps, 
         extra_step_kwargs, all_latents, num_inference_steps, 
         guidance_scale, callback, callback_steps
     ):
         """Process chunk with face"""
-        inference_faces = faces[chunk_start:chunk_end]
         latents = all_latents[:, :, chunk_start:chunk_end]
         
         # prepare audio embeds
@@ -508,37 +508,29 @@ class LipsyncPipeline(DiffusionPipeline):
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
         if len(whisper_chunks) > len(video_frames):
-            faces, boxes, affine_matrices, has_face_flags = self.affine_transform_video(video_frames)
-            num_loops = math.ceil(len(whisper_chunks) / len(video_frames))
-            loop_video_frames = []
-            loop_faces = []
-            loop_boxes = []
-            loop_affine_matrices = []
-            loop_has_face_flags = []
+            # Use index mapping to create data after the loop to avoid memory copying
+            num_original_frames = len(video_frames)
+            num_required_frames = len(whisper_chunks)
+            num_loops = math.ceil(num_required_frames / num_original_frames)
+
+            # Create frame index map
+            frame_indices = []
             for i in range(num_loops):
                 if i % 2 == 0:
-                    loop_video_frames.append(video_frames)
-                    loop_faces.append(faces)
-                    loop_boxes += boxes
-                    loop_affine_matrices += affine_matrices
-                    loop_has_face_flags += has_face_flags
+                    # Play forward
+                    indices = list(range(num_original_frames))
                 else:
-                    loop_video_frames.append(video_frames[::-1])
-                    loop_faces.append(faces.flip(0))
-                    loop_boxes += boxes[::-1]
-                    loop_affine_matrices += affine_matrices[::-1]
-                    loop_has_face_flags += has_face_flags[::-1]
-
-            video_frames = np.concatenate(loop_video_frames, axis=0)[: len(whisper_chunks)]
-            faces = torch.cat(loop_faces, dim=0)[: len(whisper_chunks)]
-            boxes = loop_boxes[: len(whisper_chunks)]
-            affine_matrices = loop_affine_matrices[: len(whisper_chunks)]
-            has_face_flags = loop_has_face_flags[: len(whisper_chunks)]
+                    # Play reverse
+                    indices = list(range(num_original_frames - 1, -1, -1))
+                frame_indices.extend(indices)
+            
+            frame_indices = frame_indices[:num_required_frames]
+            looped_video_frames = video_frames[frame_indices]
+            
+            return looped_video_frames
         else:
             video_frames = video_frames[: len(whisper_chunks)]
-            faces, boxes, affine_matrices, has_face_flags = self.affine_transform_video(video_frames)
-
-        return video_frames, faces, boxes, affine_matrices, has_face_flags
+            return video_frames
 
     @torch.no_grad()
     def __call__(
@@ -606,9 +598,12 @@ class LipsyncPipeline(DiffusionPipeline):
         audio_samples = read_audio(audio_path)
         video_frames = read_video(video_path, use_decord=False)
 
-        video_frames, faces, boxes, affine_matrices, has_face_flags = self.loop_video(whisper_chunks, video_frames)
+        video_frames = self.loop_video(whisper_chunks, video_frames)
 
         synced_video_frames = []
+        all_boxes = []
+        all_affine_matrices = []
+        all_has_face_flags = []
 
         num_channels_latents = self.vae.config.latent_channels
 
@@ -630,12 +625,11 @@ class LipsyncPipeline(DiffusionPipeline):
             chunk_end = min((i + 1) * num_frames, len(whisper_chunks))
             
             # process chunk
-            chunk_results = self.process_chunk(
+            decoded_latents, chunk_boxes, chunk_affine_matrices, chunk_has_face = self.process_chunk(
                 chunk_start,
                 chunk_end,
-                has_face_flags,
                 whisper_chunks,
-                faces,
+                video_frames,
                 height,
                 width,
                 device,
@@ -651,9 +645,12 @@ class LipsyncPipeline(DiffusionPipeline):
                 callback_steps,
             )
             
-            synced_video_frames.extend(chunk_results)
-
-        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices, has_face_flags)
+            synced_video_frames.extend(decoded_latents)
+            all_boxes.extend(chunk_boxes)
+            all_affine_matrices.extend(chunk_affine_matrices)
+            all_has_face_flags.extend(chunk_has_face)
+        
+        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, all_boxes, all_affine_matrices, all_has_face_flags)
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
