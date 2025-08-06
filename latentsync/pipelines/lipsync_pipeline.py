@@ -255,8 +255,7 @@ class LipsyncPipeline(DiffusionPipeline):
         boxes = []
         affine_matrices = []
         has_face_flags = []  # Marks each frame with or without face
-        print(f"Affine transforming {len(video_frames)} faces...")
-        for idx, frame in enumerate(tqdm.tqdm(video_frames)):
+        for idx, frame in enumerate(tqdm.tqdm(video_frames, desc="Affine transforming faces")):
             try:
                 face, box, affine_matrix = self.image_processor.affine_transform(frame)
                 faces.append(face)

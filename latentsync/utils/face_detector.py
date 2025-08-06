@@ -14,6 +14,50 @@ class FaceDetector:
         )
         self.app.prepare(ctx_id=cuda_to_int(device), det_size=(INSIGHTFACE_DETECT_SIZE, INSIGHTFACE_DETECT_SIZE))
 
+    def _is_face_suitable(self, face, frame_shape):
+        """
+        An internal helper function to check whether a detected face is suitable for lip synchronization.
+        It integrates several filtering strategies.
+
+        :param face: The single face object returned by insightface.
+        :param frame_shape: The shape of the original video frame (h, w, c).
+        
+        :return: bool, True if the face is suitable, False otherwise.
+        """
+        f_h, f_w, _ = frame_shape
+        lmk = np.round(face.landmark_2d_106).astype(np.int_)
+
+        # filter lip edge case based on lip corner distance
+        lip_center = np.mean([lmk[71], lmk[53]], axis=0)
+        left_corner_dist = np.linalg.norm(lmk[52] - lip_center)
+        right_corner_dist = np.linalg.norm(lmk[61] - lip_center)
+        min_dist = min(left_corner_dist, right_corner_dist)
+        max_dist = max(left_corner_dist, right_corner_dist)
+
+        if min_dist < max_dist * 0.2:
+            return False
+
+        # filter out-of-screen case based on nose key points
+        nose_indices = [73, 74, 86, 76, 77,  80, 82, 83]
+        nose_left = min([lmk[i][0] for i in nose_indices])
+        nose_right = max([lmk[i][0] for i in nose_indices])
+        margin_screen = 5 # smaller margin for boundary tolerance
+
+        if nose_left <= 0 + margin_screen or nose_right >= f_w - margin_screen:
+            return False
+
+        # filter side face case based on cheek key points
+        cheek_indices = [12, 14, 16, 3, 5, 7, 0, 23, 21, 19, 32, 30, 28]
+        cheek_left = np.min(lmk[cheek_indices][:, 0])
+        cheek_right = np.max(lmk[cheek_indices][:, 0])
+        margin_cheek = 5 # smaller margin for boundary tolerance
+
+        if nose_left < cheek_left + margin_cheek or nose_right > cheek_right - margin_cheek:
+            return False
+
+        return True
+
+
     def __call__(self, frame, threshold=0.5):
         f_h, f_w, _ = frame.shape
 
@@ -34,6 +78,10 @@ class FaceDetector:
                     continue
                 if face.det_score < threshold:
                     continue
+
+                if not self._is_face_suitable(face, frame.shape):
+                    continue
+
                 size_now = w * h
 
                 if size_now > max_size:
@@ -82,34 +130,10 @@ def cuda_to_int(cuda_str: str) -> int:
 
 
 LMK_ADAPT_ORIGIN_ORDER = [
-    1,
-    10,
-    12,
-    14,
-    16,
-    3,
-    5,
-    7,
-    0,
-    23,
-    21,
-    19,
-    32,
-    30,
-    28,
-    26,
-    17,
-    43,
-    48,
-    49,
-    51,
-    50,
-    102,
-    103,
-    104,
-    105,
-    101,
-    73,
-    74,
-    86,
+    1, 10, 12, 14, 16, 3, 5, 7, # left cheek
+    0, # chin
+    23, 21, 19, 32, 30, 28, 26, 17, # right cheek
+    43, 48, 49, 51, 50, # left eyebrow
+    102, 103, 104, 105, 101, # right eyebrow
+    73, 74, 86, # nose
 ]
