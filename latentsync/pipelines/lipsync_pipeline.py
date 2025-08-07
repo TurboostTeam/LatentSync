@@ -4,8 +4,9 @@ import inspect
 import math
 import os
 import shutil
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Dict, Any
 import subprocess
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -40,6 +41,21 @@ import soundfile as sf
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+@dataclass
+class ProcessingContext:
+    """Context for processing, including all parameters equired during processing"""
+    height: int
+    width: int
+    device: torch.device
+    weight_dtype: torch.dtype
+    do_classifier_free_guidance: bool
+    generator: Optional[torch.Generator]
+    timesteps: torch.Tensor
+    extra_step_kwargs: Dict[str, Any]
+    num_inference_steps: int
+    guidance_scale: float
+    callback: Optional[Callable]
+    callback_steps: int
 
 class LipsyncPipeline(DiffusionPipeline):
     _optional_components = []
@@ -60,6 +76,23 @@ class LipsyncPipeline(DiffusionPipeline):
     ):
         super().__init__()
 
+        self._handle_scheduler_compatibility(scheduler)
+        
+        self._handle_unet_compatibility(unet)
+
+        self.register_modules(
+            vae=vae,
+            audio_encoder=audio_encoder,
+            unet=unet,
+            scheduler=scheduler,
+        )
+
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+
+        self.set_progress_bar_config(desc="Steps")
+    
+    def _handle_scheduler_compatibility(self, scheduler):
+        """Handle scheduler compatibility issues"""
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
@@ -87,6 +120,8 @@ class LipsyncPipeline(DiffusionPipeline):
             new_config["clip_sample"] = False
             scheduler._internal_dict = FrozenDict(new_config)
 
+    def _handle_unet_compatibility(self, unet):
+        """Handle UNet compatibility issues"""
         is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(
             version.parse(unet.config._diffusers_version).base_version
         ) < version.parse("0.9.0.dev0")
@@ -107,17 +142,6 @@ class LipsyncPipeline(DiffusionPipeline):
             new_config = dict(unet.config)
             new_config["sample_size"] = 64
             unet._internal_dict = FrozenDict(new_config)
-
-        self.register_modules(
-            vae=vae,
-            audio_encoder=audio_encoder,
-            unet=unet,
-            scheduler=scheduler,
-        )
-
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
-
-        self.set_progress_bar_config(desc="Steps")
 
     def enable_vae_slicing(self):
         self.vae.enable_slicing()
@@ -264,7 +288,7 @@ class LipsyncPipeline(DiffusionPipeline):
                 has_face_flags.append(True)
             except RuntimeError as e:
                 if "Face not detected" in str(e):
-                    print(f"Warning: Frame {idx}: Face not detected. Using placeholder.")
+                    logger.warning(f"Frame {idx}: Face not detected. Using placeholder.")
                     placeholder_face = torch.full(
                         (
                             3, 
@@ -302,6 +326,33 @@ class LipsyncPipeline(DiffusionPipeline):
             out_frames.append(out_frame)
         return np.stack(out_frames, axis=0)
 
+    def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
+        # If the audio is longer than the video, we need to loop the video
+        if len(whisper_chunks) > len(video_frames):
+            # Use index mapping to create data after the loop to avoid memory copying
+            num_original_frames = len(video_frames)
+            num_required_frames = len(whisper_chunks)
+            num_loops = math.ceil(num_required_frames / num_original_frames)
+
+            # Create frame index map
+            frame_indices = []
+            for i in range(num_loops):
+                if i % 2 == 0:
+                    # Play forward
+                    indices = list(range(num_original_frames))
+                else:
+                    # Play reverse
+                    indices = list(range(num_original_frames - 1, -1, -1))
+                frame_indices.extend(indices)
+            
+            frame_indices = frame_indices[:num_required_frames]
+            looped_video_frames = video_frames[frame_indices]
+            
+            return looped_video_frames
+        else:
+            video_frames = video_frames[: len(whisper_chunks)]
+            return video_frames
+
     def analyze_chunk(self, has_face_flags):
         """Analyze the type of chunk：pure_face, pure_no_face, binary_mixed, complex_mixed"""
         face_count = sum(has_face_flags)
@@ -327,122 +378,92 @@ class LipsyncPipeline(DiffusionPipeline):
     
     def process_chunk(
         self, 
-        chunk_start, 
-        chunk_end, 
-        whisper_chunks, 
-        video_frames,
-        height, 
-        width, 
-        device, 
-        weight_dtype, 
-        do_classifier_free_guidance, 
-        generator, 
-        timesteps, 
-        extra_step_kwargs, 
-        all_latents, 
-        num_inference_steps, 
-        guidance_scale, 
-        callback, 
-        callback_steps
+        chunk_start: int, 
+        chunk_end: int, 
+        whisper_chunk: List, 
+        video_frame_chunk: np.ndarray,
+        latent_chunk: torch.Tensor, 
+        context: ProcessingContext
     ):
         """Process chunk and return results with metadata"""
-        chunk_video_frames = video_frames[chunk_start:chunk_end]
-        chunk_faces, chunk_boxes, chunk_affine_matrices, chunk_has_face_flags = self.affine_transform_video(chunk_video_frames)
+        chunk_faces, chunk_boxes, chunk_affine_matrices, chunk_has_face_flags = self.affine_transform_video(video_frame_chunk)
 
         chunk_type, split_info = self.analyze_chunk(chunk_has_face_flags)
         
         if chunk_type == "pure_no_face":
             # pure no face chunk, do not execute lipsync
-            print(f"Chunk [{chunk_start}:{chunk_end}]: No faces detected, adding placeholders")
-            chunk_length = chunk_end - chunk_start
-            placeholder_frames = torch.full(
-                (chunk_length, 3, height, width),
-                0.0,
-                device=device,
-                dtype=weight_dtype
+            logger.info(f"Chunk [{chunk_start}:{chunk_end}]: No faces detected, adding placeholders")
+            result = self._process_pure_no_face_chunk(
+                chunk_length=len(whisper_chunk),
+                context=context
             )
-            return [placeholder_frames], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
+            return [result], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
         
         elif chunk_type == 'pure_face':
             # pure face chunk, execute lipsync
             result = self._process_face_chunk(
-                chunk_start, chunk_end, whisper_chunks, chunk_faces, height, width,
-                device, weight_dtype, do_classifier_free_guidance,
-                generator, timesteps, extra_step_kwargs, all_latents,
-                num_inference_steps, guidance_scale, callback, callback_steps
+                whisper_chunk, chunk_faces, latent_chunk, context
             )
             return [result], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
         
         elif chunk_type == 'binary_mixed':
             # binary mixed chunk: split into two parts and process them separately
-            split_point = split_info
-            print(f"Chunk [{chunk_start}:{chunk_end}]: Binary mixed, splitting at position {split_point + chunk_start}")
-            
-            # process the first part
-            first_end = chunk_start + split_point
-            if chunk_has_face_flags[0]:  # the first part has face
-                result1 = self._process_face_chunk(
-                    chunk_start, first_end, whisper_chunks, chunk_faces[:split_point], height, width,
-                    device, weight_dtype, do_classifier_free_guidance,
-                    generator, timesteps, extra_step_kwargs, all_latents,
-                    num_inference_steps, guidance_scale, callback, callback_steps
-                )
-            else:  # the first part has no face
-                chunk_length = first_end - chunk_start
-                result1 = torch.full(
-                    (chunk_length, 3, height, width),
-                    0.0,
-                    device=device,
-                    dtype=weight_dtype
-                )
-            
-            # process the second part
-            if chunk_has_face_flags[0]:  # if the first part has face, the second part must have no face
-                chunk_length = chunk_end - first_end
-                result2 = torch.full(
-                    (chunk_length, 3, height, width),
-                    0.0,
-                    device=device,
-                    dtype=weight_dtype
-                )
-            else:  # the second part has face
-                result2 = self._process_face_chunk(
-                    first_end, chunk_end, whisper_chunks, chunk_faces[split_point:], height, width,
-                    device, weight_dtype, do_classifier_free_guidance,
-                    generator, timesteps, extra_step_kwargs, all_latents,
-                    num_inference_steps, guidance_scale, callback, callback_steps
-                )
-            
-            return [result1, result2], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
+            logger.warning(f"Chunk [{chunk_start}:{chunk_end}]: Binary mixed, splitting at position {split_info + chunk_start}")
+            result = self._process_binary_mixed_chunk(
+                whisper_chunk, chunk_faces, latent_chunk, chunk_has_face_flags, split_info, context
+            )
+            return result, chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
         
         else:  # complex_mixed
             # complex mixed chunk, warning and process as a whole chunk
-            print(f"WARNING: Chunk [{chunk_start}:{chunk_end}]: Complex mixed pattern detected!")
-            print(f"  Pattern: {chunk_has_face_flags}")
-            print(f"  Transitions at: {split_info}")
-            print(f"  Processing as a whole chunk (may affect quality)")
+            logger.warning(f"Chunk [{chunk_start}:{chunk_end}]: Complex mixed pattern detected!")
+            logger.warning(f"  Pattern: {chunk_has_face_flags}")
+            logger.warning(f"  Transitions at: {split_info}")
+            logger.warning(f"  Processing as a whole chunk (may affect quality)")
             
             result = self._process_face_chunk(
-                chunk_start, chunk_end, whisper_chunks, chunk_faces, height, width,
-                device, weight_dtype, do_classifier_free_guidance,
-                generator, timesteps, extra_step_kwargs, all_latents,
-                num_inference_steps, guidance_scale, callback, callback_steps
+                whisper_chunk, chunk_faces, latent_chunk, context
             )
             return [result], chunk_boxes, chunk_affine_matrices, chunk_has_face_flags
 
+    def _process_pure_no_face_chunk(
+        self,
+        chunk_length: int,
+        context: ProcessingContext
+    ):
+        placeholder_frames = torch.full(
+            (chunk_length, 3, context.height, context.width),
+            0.0,
+            device=context.device,
+            dtype=context.weight_dtype
+        )
+        return placeholder_frames
+
     def _process_face_chunk(
-        self, chunk_start, chunk_end, whisper_chunks, inference_faces, 
-        height, width, device, weight_dtype, 
-        do_classifier_free_guidance, generator, timesteps, 
-        extra_step_kwargs, all_latents, num_inference_steps, 
-        guidance_scale, callback, callback_steps
+        self, 
+        whisper_chunk: List, 
+        inference_faces: torch.Tensor, 
+        latents: torch.Tensor, 
+        context: ProcessingContext
     ):
         """Process chunk with face"""
-        latents = all_latents[:, :, chunk_start:chunk_end]
-        
+
+        height = context.height
+        width = context.width
+        device = context.device
+        weight_dtype = context.weight_dtype
+        do_classifier_free_guidance = context.do_classifier_free_guidance
+        generator = context.generator
+        timesteps = context.timesteps
+        extra_step_kwargs = context.extra_step_kwargs
+        num_inference_steps = context.num_inference_steps
+        guidance_scale = context.guidance_scale
+        callback = context.callback
+        callback_steps = context.callback_steps
+
         # prepare audio embeds
         if self.unet.add_audio_layer:
-            audio_embeds = torch.stack(whisper_chunks[chunk_start:chunk_end])
+            audio_embeds = torch.stack(whisper_chunk)
             audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
             if do_classifier_free_guidance:
                 null_audio_embeds = torch.zeros_like(audio_embeds)
@@ -504,33 +525,42 @@ class LipsyncPipeline(DiffusionPipeline):
         
         return decoded_latents
 
-    def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
-        # If the audio is longer than the video, we need to loop the video
-        if len(whisper_chunks) > len(video_frames):
-            # Use index mapping to create data after the loop to avoid memory copying
-            num_original_frames = len(video_frames)
-            num_required_frames = len(whisper_chunks)
-            num_loops = math.ceil(num_required_frames / num_original_frames)
+    def _process_binary_mixed_chunk(
+        self,
+        whisper_chunk: List,
+        chunk_faces: torch.Tensor,
+        latent_chunk: torch.Tensor,
+        chunk_has_face_flags: List[bool],
+        split_point: int,
+        context: ProcessingContext
+    ):
+        # process the first part
+        if chunk_has_face_flags[0]:  # the first part has face
+            result1 = self._process_face_chunk(
+                whisper_chunk[:split_point], 
+                chunk_faces[:split_point], 
+                latent_chunk[:, :, :split_point], 
+                context
+            )
+            result2 = self._process_pure_no_face_chunk(
+                chunk_length=len(whisper_chunk) - split_point,
+                context=context
+            )
+        else:  # the first part has no face
+            result1 = self._process_pure_no_face_chunk(
+                chunk_length=split_point,
+                context=context
+            )
+            result2 = self._process_face_chunk(
+                whisper_chunk[split_point:], 
+                chunk_faces[split_point:], 
+                latent_chunk[:, :, split_point:], 
+                context
+            )
+        
+        return [result1, result2]
 
-            # Create frame index map
-            frame_indices = []
-            for i in range(num_loops):
-                if i % 2 == 0:
-                    # Play forward
-                    indices = list(range(num_original_frames))
-                else:
-                    # Play reverse
-                    indices = list(range(num_original_frames - 1, -1, -1))
-                frame_indices.extend(indices)
-            
-            frame_indices = frame_indices[:num_required_frames]
-            looped_video_frames = video_frames[frame_indices]
-            
-            return looped_video_frames
-        else:
-            video_frames = video_frames[: len(whisper_chunks)]
-            return video_frames
-
+    
     @torch.no_grad()
     def __call__(
         self,
@@ -599,11 +629,6 @@ class LipsyncPipeline(DiffusionPipeline):
 
         video_frames = self.loop_video(whisper_chunks, video_frames)
 
-        synced_video_frames = []
-        all_boxes = []
-        all_affine_matrices = []
-        all_has_face_flags = []
-
         num_channels_latents = self.vae.config.latent_channels
 
         # Prepare latent variables
@@ -617,8 +642,30 @@ class LipsyncPipeline(DiffusionPipeline):
             generator,
         )
 
+        # 创建处理上下文
+        context = ProcessingContext(
+            height=height,
+            width=width,
+            device=device,
+            weight_dtype=weight_dtype,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            generator=generator,
+            timesteps=timesteps,
+            extra_step_kwargs=extra_step_kwargs,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            callback=callback,
+            callback_steps=callback_steps
+        )
+
+        synced_video_frames = []
+        all_boxes = []
+        all_affine_matrices = []
+        all_has_face_flags = []
+
         num_inferences = math.ceil(len(whisper_chunks) / num_frames)
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
+            logger.info(f"\n\nProcessing chunk {i}...")
 
             chunk_start = i * num_frames
             chunk_end = min((i + 1) * num_frames, len(whisper_chunks))
@@ -627,21 +674,10 @@ class LipsyncPipeline(DiffusionPipeline):
             decoded_latents, chunk_boxes, chunk_affine_matrices, chunk_has_face = self.process_chunk(
                 chunk_start,
                 chunk_end,
-                whisper_chunks,
-                video_frames,
-                height,
-                width,
-                device,
-                weight_dtype,
-                do_classifier_free_guidance,
-                generator,
-                timesteps,
-                extra_step_kwargs,
-                all_latents,
-                num_inference_steps,
-                guidance_scale,
-                callback,
-                callback_steps,
+                whisper_chunk=whisper_chunks[chunk_start:chunk_end],
+                video_frame_chunk=video_frames[chunk_start:chunk_end],
+                latent_chunk=all_latents[:, :, chunk_start:chunk_end],
+                context=context
             )
             
             synced_video_frames.extend(decoded_latents)
