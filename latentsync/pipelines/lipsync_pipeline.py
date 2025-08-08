@@ -26,7 +26,7 @@ from diffusers.schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from diffusers.utils import deprecate, logging
+from diffusers.utils import deprecate
 
 from einops import rearrange
 import cv2
@@ -35,11 +35,16 @@ from ..models.unet import UNet3DConditionModel
 from ..utils.util import read_video, read_audio, write_video, check_ffmpeg_installed
 from ..utils.image_processor import ImageProcessor, load_fixed_mask
 from ..utils.resample import resample_video_fps, resample_audio_sr
+from ..utils.logger_config import setup_diffusers_logger
 from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+logger = setup_diffusers_logger(
+    logger_name="lipsync_pipeline",
+    to_console=False,
+    to_file=True,
+)
 
 @dataclass
 class ProcessingContext:
@@ -665,7 +670,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
         num_inferences = math.ceil(len(whisper_chunks) / num_frames)
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
-            logger.info(f"\n\nProcessing chunk {i}...")
+            logger.info(f"Processing chunk {i}...")
 
             chunk_start = i * num_frames
             chunk_end = min((i + 1) * num_frames, len(whisper_chunks))
