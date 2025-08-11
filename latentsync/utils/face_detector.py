@@ -58,7 +58,7 @@ class FaceDetector:
         return True
 
 
-    def __call__(self, frame, threshold=0.5):
+    def __call__(self, frame, threshold=0.6):
         f_h, f_w, _ = frame.shape
 
         faces = self.app.get(frame)
