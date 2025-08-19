@@ -6,8 +6,8 @@ import { Worker, Job } from 'bullmq';
 import os from 'os';
 import { redisConnection, queueConfig } from '../config';
 import logger from '../utils/logger';
-import { validatePythonEnvironment } from '../utils/pythonExecutor';
-import { QueueProcessor } from './queueProcessor';
+import { validatePythonEnvironment } from '../utils/python-executor';
+import { QueueProcessor } from './queue-processor';
 
 /**
  * 任务输入数据类型定义

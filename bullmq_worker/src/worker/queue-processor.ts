@@ -4,7 +4,7 @@ import * as os from 'os';
 import { promisify } from 'util';
 import { getStorageClient } from '../storage/storage-factory';
 import logger from '../utils/logger';
-import { executePythonScript } from '../utils/pythonExecutor';
+import { executePythonScript } from '../utils/python-executor';
 
 const mkdtemp = promisify(fs.mkdtemp);
 const rm = promisify(fs.rm);
