@@ -6,19 +6,32 @@ import { Worker, Job } from 'bullmq';
 import os from 'os';
 import { redisConnection, queueConfig } from '../config';
 import logger from '../utils/logger';
-import { executePythonScript, validatePythonEnvironment, TaskData, TaskResult } from '../utils/pythonExecutor';
+import { validatePythonEnvironment } from '../utils/pythonExecutor';
+import { QueueProcessor } from './queueProcessor';
+
+/**
+ * 任务输入数据类型定义
+ */
+export type TaskData = { video_url: string; audio_url: string };
+
+/**
+ * 任务返回结果类型定义
+ */
+export type TaskResult = string;
+
+const queueProcessor = new QueueProcessor();
+
 
 // 处理单个任务的核心函数
-async function processTask(job: Job<TaskData>): Promise<TaskResult> {
+async function processTask(job: Job<TaskData>): Promise<string> {
 	const startTime = Date.now();
 	
-	logger.info(`🔄 开始处理唇形同步任务`, { 
-		jobId: job.id, 
-		data: job.data 
-	});
+	logger.info(`🔄 --- 开始处理唇形同步任务，任务ID: ${job.id} ---`);
 	
 	try {
-		const result = await executePythonScript(job.data);
+		const { video_url: videoUrl, audio_url: audioUrl } = job.data;
+
+		const output_video_url = await queueProcessor.processTask(videoUrl, audioUrl);
 		
 		// 更新任务进度到90%：Python脚本执行完成，准备返回结果
 		await job.updateProgress(90);
@@ -27,14 +40,12 @@ async function processTask(job: Job<TaskData>): Promise<TaskResult> {
 		
 		logger.info(`✅ 任务处理完成`, { 
 			jobId: job.id,
+			outputVideoUrl: output_video_url,
 			totalProcessingTimeMinutes: totalTimeMinutes,
 		});
 		
 		// 在结果中添加Worker信息和总处理时间
-		return { 
-			...result, 
-			total_processing_time_minutes: totalTimeMinutes 
-		} as TaskResult;
+		return output_video_url;
 		
 	} catch (error) {
 		// 任务处理失败，记录详细的错误信息
@@ -111,9 +122,8 @@ export async function createWorker(): Promise<Worker> {
 	
 	// 注册Worker停滞任务事件监听器 - 检测长时间无进度的任务
 	worker.on('stalled', (jobId) => {
-		logger.warn('⚠️ 检测到停滞任务', { 
+		logger.warn('⚠️ 检测到停滞任务，即将重试', { 
 			jobId,
-			message: '任务可能由于Worker崩溃或网络问题而停滞'
 		});
 	});
 	

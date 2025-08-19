@@ -29,3 +29,12 @@ export const queueConfig = {
 	concurrency: parseInt(process.env.WORKER_CONCURRENCY || '1'),
 };
 
+
+export const s3Config = {
+	endpoint: process.env.S3_ENDPOINT || '',
+	accessKey: process.env.S3_ACCESS_KEY || '',
+	secretKey: process.env.S3_SECRET_KEY || '',
+	region: process.env.S3_REGION || '',
+	bucket: process.env.S3_BUCKET || '',
+};
+
