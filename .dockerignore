@@ -1,0 +1,36 @@
+# Node modules 
+bullmq_worker/node_modules
+bullmq_worker/dist
+bullmq_producer/
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# IDEs
+.vscode
+.idea
+*.swp
+*.swo
+
+# Temporary files
+.tmp
+.temp

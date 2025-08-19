@@ -55,4 +55,3 @@ wandb/
 bullmq_producer/
 downloads/
 node_modules/
-package-lock.json
