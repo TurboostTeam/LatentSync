@@ -49,7 +49,7 @@ COPY bullmq_worker/package*.json ./bullmq_worker/
 WORKDIR /app/bullmq_worker
 
 # 安装Node.js依赖
-RUN npm ci --only=production
+RUN npm ci
 
 
 # 切换回主工作目录，并复制剩余的项目文件
