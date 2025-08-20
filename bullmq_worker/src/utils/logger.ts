@@ -17,6 +17,9 @@ const customFormat = printf(({ level, message, timestamp, ...metadata }) => {
 });
 
 
+// 检测是否在TTY环境中，如果不是则禁用颜色
+const isColorSupported = process.stdout.isTTY && !process.env.NO_COLOR;
+
 const logger = winston.createLogger({
 	level: process.env.LOG_LEVEL || 'info',
 
@@ -30,7 +33,9 @@ const logger = winston.createLogger({
 	
 	transports: [
 		new winston.transports.Console({ 
-			format: combine(colorize(), customFormat) 
+			format: isColorSupported 
+				? combine(colorize(), customFormat)
+				: customFormat
 		})
 	],
 });
