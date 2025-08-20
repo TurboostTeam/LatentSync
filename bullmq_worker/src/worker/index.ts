@@ -75,17 +75,24 @@ export async function createWorker(): Promise<Worker> {
 			
 			// 并发处理任务数量
 			concurrency: queueConfig.concurrency,
-			
-			// 自动开始处理任务
-			autorun: true,
-			
-			// 检查停滞任务的间隔时间（毫秒）
-			// 停滞任务是指长时间没有更新进度的任务
-			stalledInterval: 60000, // 1分钟
-			
+
+			// 任务被锁定的最大时间
+			// 防止其他 Worker 重复处理同一任务，任务完成后立即释放，不需要等待
+			lockDuration: 5 * 60 * 1000,
+
+			// 定期更新锁，将锁的有效期重置为 lockDuration
+            lockRenewTime: 2 * 60 * 1000,
+
+			//检查停滞任务的间隔时间（毫秒）
+			// 30秒检查一次，将停滞任务重新放回队列
+			stalledInterval: 30000,
+
 			// 最大停滞次数
 			// 超过这个次数的任务会被标记为失败
 			maxStalledCount: 1,
+
+			// 自动开始处理任务
+			autorun: true,
 		}
 	);
 	
