@@ -6,7 +6,6 @@ import { Worker, Job } from 'bullmq';
 import os from 'os';
 import { redisConnection, queueConfig } from '../config';
 import logger from '../utils/logger';
-import { validatePythonEnvironment } from '../utils/python-executor';
 import { QueueProcessor } from './queue-processor';
 
 /**
@@ -64,14 +63,6 @@ async function processTask(job: Job<TaskData>): Promise<string> {
 
 // 创建并配置Worker实例
 export async function createWorker(): Promise<Worker> {
-	// 验证Python运行环境
-	logger.info('🔍 验证Python运行环境...');
-	const isPythonAvailable = await validatePythonEnvironment();
-	
-	if (!isPythonAvailable) {
-		throw new Error('Python环境不可用，请检查Python安装和配置');
-	}
-	
 	// 创建BullMQ Worker实例
 	logger.info('🔨 创建Worker实例...');
 	
