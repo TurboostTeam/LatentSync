@@ -13,7 +13,8 @@ export async function executePythonScript(
 	inputVideoPath: string,
     inputAudioPath: string,
     outputVideoPath: string,
-    tempDir: string
+    tempDir: string,
+    progressCallback?: (progress: number, message: string) => Promise<void>
 ): Promise<void> {
 	return new Promise((resolve, reject) => {
 		logger.info('🔄 开始执行唇形同步推理...');
@@ -45,7 +46,36 @@ export async function executePythonScript(
 		// 监听Python脚本的标准输出
 		// data事件会多次触发，需要累积所有数据
 		pythonProcess.stdout.on('data', (data) => {
-			outputData += data.toString();
+			const output = data.toString();
+			outputData += output;
+			
+			// 解析进度信息
+			if (progressCallback) {
+				const lines = output.split('\n');
+				for (const line of lines) {
+					if (line.startsWith('PROGRESS_UPDATE:')) {
+						try {
+							const progressDataStr = line.replace('PROGRESS_UPDATE:', '');
+							const progressData = JSON.parse(progressDataStr);
+							
+							if (progressData.type === 'progress') {
+								// 异步调用进度回调，但不等待完成以避免阻塞
+								progressCallback(
+									progressData.progress,
+									progressData.message
+								).catch((err) => {
+									logger.warn('进度回调执行失败', { error: err.message });
+								});
+							}
+						} catch (parseError) {
+							logger.warn('解析进度信息失败', { 
+								line,
+								error: parseError instanceof Error ? parseError.message : String(parseError)
+							});
+						}
+					}
+				}
+			}
 		});
 		
 		// 监听Python脚本的标准错误输出

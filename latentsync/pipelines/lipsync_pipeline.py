@@ -4,6 +4,8 @@ import inspect
 import math
 import os
 import shutil
+import sys
+import json
 from typing import Callable, List, Optional, Union, Dict, Any
 import subprocess
 from dataclasses import dataclass
@@ -61,6 +63,16 @@ class ProcessingContext:
     guidance_scale: float
     callback: Optional[Callable]
     callback_steps: int
+
+def output_progress(progress: float, message: str):
+    """输出进度信息到stdout，供Node.js解析"""
+    progress_data = {
+        "type": "progress",
+        "progress": min(100, max(0, progress)),  # 确保进度在0-100之间
+        "message": message
+    }
+    # 使用特殊前缀，便于Node.js识别
+    print(f"PROGRESS_UPDATE:{json.dumps(progress_data)}", flush=True)
 
 class LipsyncPipeline(DiffusionPipeline):
     _optional_components = []
@@ -315,8 +327,15 @@ class LipsyncPipeline(DiffusionPipeline):
     def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list, has_face_flags: list):
         video_frames = video_frames[: len(faces)]
         out_frames = []
-        print(f"Restoring {len(faces)} faces...")
+        total_faces = len(faces)
+        print(f"Restoring {total_faces} faces...")
+        
         for index, face in enumerate(tqdm.tqdm(faces)):
+            # 输出恢复进度 (占 75-87.5%，即 12.5% 的范围)
+            restore_progress = 75 + (index / total_faces) * 12.5
+            if index % max(1, total_faces // 10) == 0:  # 每10%输出一次，避免过多输出
+                output_progress(restore_progress, f"restoration - 恢复帧 {index+1}/{total_faces}")
+                
             # If there is no face in the current frame, use the original frame directly
             if not has_face_flags[index]:
                 out_frames.append(video_frames[index])
@@ -669,8 +688,14 @@ class LipsyncPipeline(DiffusionPipeline):
         all_has_face_flags = []
 
         num_inferences = math.ceil(len(whisper_chunks) / num_frames)
+        output_progress(12.5, f"initialization - 推理初始化完成。准备处理 {num_inferences} 个 chunk")
+        
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
-            logger.info(f"Processing chunk {i}...")
+            logger.info(f"Processing chunk {i} / {num_inferences}...")
+            
+            # 计算当前chunk的进度 (chunk处理阶段占 12.5-75%，即 62.5% 的范围)
+            chunk_progress = 12.5 + ( i / num_inferences ) * 62.5
+            output_progress(chunk_progress, f"doing_inference - 处理 chunk {i+1}/{num_inferences}")
 
             chunk_start = i * num_frames
             chunk_end = min((i + 1) * num_frames, len(whisper_chunks))
@@ -690,7 +715,9 @@ class LipsyncPipeline(DiffusionPipeline):
             all_affine_matrices.extend(chunk_affine_matrices)
             all_has_face_flags.extend(chunk_has_face)
         
+        output_progress(75, "restoration - 推理完成。开始将生成的人脸区域粘贴回原始视频帧中")
         synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, all_boxes, all_affine_matrices, all_has_face_flags)
+        output_progress(87.5, "restoration - 视频恢复完成")
 
         audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
@@ -702,9 +729,12 @@ class LipsyncPipeline(DiffusionPipeline):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
 
+        output_progress(87.5, "temporary_file_write - 开始将生成的视频帧和音频写入临时文件")
         write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=video_fps)
-
+        output_progress(91.25, "temporary_file_write - 视频文件写入完成")
         sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
+        output_progress(95, "temporary_file_write - 音频文件写入完成。开始合成最终输出")
 
         command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)
+        output_progress(100, "final_synthesis - 最终视频合成完成")

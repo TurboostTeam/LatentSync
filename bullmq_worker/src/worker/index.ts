@@ -30,20 +30,29 @@ async function processTask(job: Job<TaskData>): Promise<string> {
 	try {
 		const { video_url: videoUrl, audio_url: audioUrl } = job.data;
 
-		const output_video_url = await queueProcessor.processTask(videoUrl, audioUrl);
-		
-		// 更新任务进度到90%：Python脚本执行完成，准备返回结果
-		await job.updateProgress(90);
+		// 更新进度：开始处理
+		await job.updateProgress(1);
+
+		const output_video_url = await queueProcessor.processTask(videoUrl, audioUrl, async (progressPercentage: number, message: string) => {
+			// QueueProcessor已经将进度映射到了合适的范围，直接使用
+			const actualProgress = Math.round(progressPercentage);
+			await job.updateProgress(actualProgress);
+			
+			logger.info(`📊 任务进度更新: ${actualProgress}% - ${message}`);
+		});
 		
 		const totalTimeMinutes = parseFloat(((Date.now() - startTime) / 1000 / 60).toFixed(2));
 		
-		logger.info(`✅ 任务处理完成`, { 
+		logger.info(`🎉 任务处理完成`, { 
 			jobId: job.id,
 			outputVideoUrl: output_video_url,
 			totalProcessingTimeMinutes: totalTimeMinutes,
 		});
+
+		// 最终完成，进度更新到100%
+		await job.updateProgress(100);
+		logger.info(`📊 任务进度更新: 100%`);
 		
-		// 在结果中添加Worker信息和总处理时间
 		return output_video_url;
 		
 	} catch (error) {

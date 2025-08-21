@@ -16,7 +16,11 @@ const rm = promisify(fs.rm);
 export class QueueProcessor {
   private storageClient = getStorageClient();
   
-  async processTask(videoUrl: string, audioUrl: string): Promise<string> {
+  async processTask(
+    videoUrl: string, 
+    audioUrl: string, 
+    progressCallback?: (progress: number, message: string) => Promise<void>
+  ): Promise<string> {
     // 在系统临时目录下创建一个唯一的临时文件夹
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'lipsync-'));
     
@@ -29,15 +33,18 @@ export class QueueProcessor {
       // 下载输入文件
       logger.info(`🔄 开始下载视频: ${videoUrl}`);
       await this.downloadInputFile(videoUrl, videoPath);
+      if (progressCallback) await progressCallback(5, '视频下载完成');
       
       logger.info(`🔄 开始下载音频: ${audioUrl}`);
       await this.downloadInputFile(audioUrl, audioPath);
+      if (progressCallback) await progressCallback(10, '音频下载完成');
       
       // 运行推理子进程
-      await this.runInferenceSubprocess(videoPath, audioPath, outputPath, tempDir);
+      await this.runInferenceSubprocess(videoPath, audioPath, outputPath, tempDir, progressCallback);
       
       // 上传结果
       const outputUrl = await this.uploadResult(videoUrl, outputPath);
+      if (progressCallback) await progressCallback(95, '文件上传完成。准备清理临时文件');
       
       return outputUrl;
     } finally {
@@ -65,10 +72,19 @@ export class QueueProcessor {
     videoPath: string,
     audioPath: string,
     outputPath: string,
-    tempDir: string
+    tempDir: string,
+    progressCallback?: (progress: number, message: string) => Promise<void>
   ): Promise<void> {
+    // 创建一个包装的进度回调，将Python进度映射到总体进度范围
+    const wrappedCallback = progressCallback ? async (pythonProgress: number, message: string) => {
+      // Python推理阶段占总进度的10-90%，即80%的范围
+      // 将Python的0-100%映射到10-90%
+      const mappedProgress = 10 + (pythonProgress / 100) * 80;
+      await progressCallback(Math.min(90, Math.max(10, mappedProgress)), message);
+    } : undefined;
+    
     // 调用executePythonScript执行推理
-    await executePythonScript(videoPath, audioPath, outputPath, path.join(tempDir, 'temp'));
+    await executePythonScript(videoPath, audioPath, outputPath, path.join(tempDir, 'temp'), wrappedCallback);
   }
   
   /**
