@@ -55,3 +55,4 @@ wandb/
 bullmq_producer/
 downloads/
 node_modules/
+tests/
