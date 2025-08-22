@@ -11,6 +11,11 @@ import logger from '../utils/logger';
 export class AliyunOSSClient extends BaseStorageClient {
   private client: OSS;
   
+  // 上传优化配置（可根据网络环境调整）
+  private readonly MULTIPART_THRESHOLD = 10 * 1024 * 1024; // 10MB，超过此大小启用分片
+  private readonly PART_SIZE = 10 * 1024 * 1024; // 10MB，每个分片大小（建议5-20MB）
+  private readonly MAX_CONCURRENT_PARTS = 3; // 最大并行分片数（建议2-5，网络好可增加到8）
+  
   constructor(config: StorageConfig) {
     super(config);
     
@@ -99,9 +104,9 @@ export class AliyunOSSClient extends BaseStorageClient {
         
         logger.info(`📤 开始上传文件 (第${attempt}/${maxRetries}次尝试): ${localPath}, 大小: ${fileSizeInMB.toFixed(2)}MB`);
         
-        // 对于大于10MB的文件使用分片上传
-        if (stats.size > 10 * 1024 * 1024) {
-          logger.info(`📤 使用分片上传处理大文件: ${fileSizeInMB.toFixed(2)}MB`);
+        // 对于超过阈值的文件使用分片上传
+        if (stats.size > this.MULTIPART_THRESHOLD) {
+          logger.info(`📤 使用分片上传处理大文件: ${fileSizeInMB.toFixed(2)}MB (阈值: ${this.MULTIPART_THRESHOLD / (1024 * 1024)}MB)`);
           await this.multipartUpload(objectKey, localPath, stats.size);
         } else {
           // 小文件使用普通上传
@@ -135,65 +140,96 @@ export class AliyunOSSClient extends BaseStorageClient {
   }
   
   /**
-   * 分片上传大文件
+   * 分片上传大文件（并行）
    */
   private async multipartUpload(objectKey: string, localPath: string, fileSize: number): Promise<void> {
-    const partSize = 10 * 1024 * 1024; // 10MB per part
+    const partSize = this.PART_SIZE;
     const totalParts = Math.ceil(fileSize / partSize);
+    const maxConcurrent = this.MAX_CONCURRENT_PARTS;
     
-    logger.info(`📤 分片上传开始: ${totalParts} 个分片，每个分片 ${partSize / (1024 * 1024)}MB`);
+    logger.info(`📤 分片上传开始: ${totalParts} 个分片，每个分片 ${partSize / (1024 * 1024)}MB，并行数为 ${maxConcurrent}`);
     
     try {
       // 初始化分片上传
       const uploadId = await this.client.initMultipartUpload(objectKey);
       
-      const parts = [];
-      const fileHandle = fs.openSync(localPath, 'r');
-      
-      // 逐个上传分片
-      let uploadedBytes = 0;
+      const parts: Array<{ number: number; etag: string }> = [];
       const startTime = Date.now();
+      let uploadedBytes = 0;
       
+      // 准备所有分片任务
+      const uploadTasks = [];
       for (let i = 0; i < totalParts; i++) {
         const partNumber = i + 1;
         const start = i * partSize;
         const end = Math.min(start + partSize, fileSize);
         const partLength = end - start;
         
-        const buffer = Buffer.allocUnsafe(partLength);
-        fs.readSync(fileHandle, buffer, 0, partLength, start);
-        
-        const partStartTime = Date.now();
-        const progress = ((i) / totalParts * 100).toFixed(1);
-        
-        logger.info(`📤 上传分片 ${partNumber}/${totalParts} (${progress}%) - 大小: ${(partLength / (1024 * 1024)).toFixed(2)}MB`);
-        
-        const partResult = await this.client.uploadPart(
-          objectKey,
-          uploadId.uploadId,
+        uploadTasks.push({
           partNumber,
-          buffer
-        );
-        
-        uploadedBytes += partLength;
-        const partElapsed = Date.now() - partStartTime;
-        const totalElapsed = Date.now() - startTime;
-        const avgSpeed = uploadedBytes / (totalElapsed / 1000) / (1024 * 1024); // MB/s
-        const eta = totalElapsed > 0 ? ((fileSize - uploadedBytes) / uploadedBytes) * totalElapsed : 0;
-        
-        logger.info(`✅ 分片 ${partNumber} 上传完成 - 耗时: ${(partElapsed/1000).toFixed(1)}s, 平均速度: ${avgSpeed.toFixed(2)}MB/s, 预计剩余: ${(eta/1000/60).toFixed(1)}分钟`);
-        
-        parts.push({
-          number: partNumber,
-          etag: partResult.etag
+          start,
+          partLength,
         });
       }
       
-      fs.closeSync(fileHandle);
+      // 并行上传分片
+      const uploadPart = async (task: { partNumber: number; start: number; partLength: number }) => {
+        const { partNumber, start, partLength } = task;
+        
+        // 读取分片数据
+        const buffer = Buffer.allocUnsafe(partLength);
+        const fileHandle = fs.openSync(localPath, 'r');
+        fs.readSync(fileHandle, buffer, 0, partLength, start);
+        fs.closeSync(fileHandle);
+        
+        const partStartTime = Date.now();
+        logger.info(`📤 上传分片 ${partNumber}/${totalParts} - 大小: ${(partLength / (1024 * 1024)).toFixed(2)}MB`);
+        
+        try {
+          const partResult = await this.client.uploadPart(
+            objectKey,
+            uploadId.uploadId,
+            partNumber,
+            buffer
+          );
+          
+          const partElapsed = Date.now() - partStartTime;
+          const speed = (partLength / (1024 * 1024)) / (partElapsed / 1000); // MB/s
+          
+          uploadedBytes += partLength;
+          
+          logger.info(`✅ 分片 ${partNumber} 上传完成 - 耗时: ${(partElapsed/1000).toFixed(1)}s, 平均速度: ${speed.toFixed(2)}MB/s`);
+          
+          return {
+            number: partNumber,
+            etag: partResult.etag
+          };
+        } catch (error) {
+          logger.error(`❌ 分片 ${partNumber} 上传失败: ${error}`);
+          throw error;
+        }
+      };
+      
+      // 使用Promise并发控制
+      for (let i = 0; i < uploadTasks.length; i += maxConcurrent) {
+        const batch = uploadTasks.slice(i, i + maxConcurrent);
+        const batchResults = await Promise.all(batch.map(uploadPart));
+        parts.push(...batchResults);
+        
+        const totalElapsed = Date.now() - startTime;
+        const avgSpeed = uploadedBytes / (totalElapsed / 1000) / (1024 * 1024); // MB/s
+        logger.info(`📊 批次完成 - 平均速度: ${avgSpeed.toFixed(2)}MB/s`);
+      }
+      
+      // 按分片号排序
+      parts.sort((a, b) => a.number - b.number);
       
       // 完成分片上传
       await this.client.completeMultipartUpload(objectKey, uploadId.uploadId, parts);
-      logger.info(`✅ 分片上传完成: ${totalParts} 个分片`);
+      
+      const totalElapsed = Date.now() - startTime;
+      const avgSpeed = fileSize / (1024 * 1024) / (totalElapsed / 1000);
+      logger.info(`✅ 分片全部上传完成: ${totalParts} 个分片，总耗时: ${(totalElapsed/1000/60).toFixed(1)}分钟，平均速度: ${avgSpeed.toFixed(2)}MB/s`);
       
     } catch (error) {
       logger.error(`❌ 分片上传失败: ${error}`);
