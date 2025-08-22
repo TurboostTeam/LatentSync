@@ -2,8 +2,7 @@
  * Worker核心逻辑模块
  */
 
-import { Worker, Job } from 'bullmq';
-import os from 'os';
+import { Worker, Job, Queue } from 'bullmq';
 import { redisConnection, queueConfig } from '../config';
 import logger from '../utils/logger';
 import { QueueProcessor } from './queue-processor';
@@ -19,6 +18,49 @@ export type TaskData = { video_url: string; audio_url: string };
 export type TaskResult = string;
 
 const queueProcessor = new QueueProcessor();
+
+/**
+ * 记录当前队列状态的辅助函数
+ */
+async function logQueueStatus(): Promise<void> {
+	try {
+		// 创建Queue实例以获取状态信息
+		const queue = new Queue(queueConfig.name, { connection: redisConnection });
+		
+		// 检查队列中是否有任务（包括等待、活动、延迟、停滞等状态的任务）
+		const [waitingJobs, activeJobs, delayedJobs, prioritizedJobs] = await Promise.all([
+			queue.getWaiting(),
+			queue.getActive(),
+			queue.getDelayed(),
+			queue.getPrioritized(),
+		]);
+		
+		const waitingCount = waitingJobs.length;
+		const activeCount = activeJobs.length;
+		const delayedCount = delayedJobs.length;
+		const prioritizedCount = prioritizedJobs.length;
+		
+		const totalPending = waitingCount + activeCount + delayedCount + prioritizedCount;
+		
+		if (totalPending === 0) {
+			logger.info('📋 队列状态: 全部任务已处理完毕');
+		} else {
+			logger.info('📋 队列状态', {
+				waiting: waitingCount,
+				active: activeCount,
+				delayed: delayedCount,
+				prioritized: prioritizedCount,
+				totalPending
+			});
+		}
+		
+		await queue.close();
+	} catch (error) {
+		logger.error('❌ 获取队列状态失败', {
+			error: error instanceof Error ? error.message : String(error)
+		});
+	}
+}
 
 
 // 处理单个任务的核心函数
@@ -106,7 +148,7 @@ export async function createWorker(): Promise<Worker> {
 	);
 	
 	// 注册任务失败事件监听器 - 记录最终失败状态
-	worker.on('failed', (job, err) => {
+	worker.on('failed', (job: Job<TaskData> | undefined, err: Error) => {
 		// 仅在重试次数达到上限时记录，避免与processTask中的错误日志重复
 		if (job && job.attemptsMade >= (job.opts?.attempts || 1)) {
 			logger.error('❌ 任务最终失败', { 
@@ -119,7 +161,7 @@ export async function createWorker(): Promise<Worker> {
 	});
 	
 	// 注册Worker错误事件监听器 - 捕获系统级错误
-	worker.on('error', (err) => {
+	worker.on('error', (err: Error) => {
 		logger.error('❌ Worker系统错误', { 
 			error: err.message,
 			stack: err.stack,
@@ -128,10 +170,23 @@ export async function createWorker(): Promise<Worker> {
 	});
 	
 	// 注册Worker停滞任务事件监听器 - 检测长时间无进度的任务
-	worker.on('stalled', (jobId) => {
+	worker.on('stalled', (jobId: string) => {
 		logger.warn('⚠️ 检测到停滞任务，即将重试', { 
 			jobId,
 		});
+	});
+
+	// 注册任务完成事件监听器 - 任务成功完成时触发
+	// worker.on('completed', async () => {
+	// 	// 任务完成后检查队列状态是否为空
+	// 	await logQueueStatus();
+	// });
+
+	// 注册Worker空闲事件监听器 - 当没有更多任务需要处理时触发
+	worker.on('drained', async () => {
+		logger.info('🏁 Worker空闲，检查队列状态');
+
+		await logQueueStatus();
 	});
 	
 	// 记录Worker启动成功日志
